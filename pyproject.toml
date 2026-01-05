@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=80", "setuptools-scm[simple]>=8"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "retico-maai"
+dynamic = ["version"]
+requires-python = ">=3.10"
+dependencies = [
+    "maai",
+    "retico-core>=2.0.0",
+    "torch",
+]
+authors = [
+    {name = "Porter Rigby"},
+]
+description = "MaAI bindings for Retico"
+readme = "README.md"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
+keywords = ['dialogue', 'real-time', 'retico', 'turn-taking', 'SDS']
