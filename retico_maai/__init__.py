@@ -1,1 +1,1 @@
-from .MaAI import MaAI
+from .MaAI import TurnTakingModule

@@ -1,20 +1,21 @@
 # retico-maai
     
-Retico bindings for [MaAI](https://github.com/MaAI-Kyoto/MaAI).
+Retico bindings for [MaAI](https://github.com/MaAI-Kyoto/MaAI),
+providing turn-taking, backchannel, and nodding inference.
 
 ### Installation and requirements ###
 
 The package can be installed using the following:  
 `pip install git+https://github.com/retico-team/retico-maai`
 
-### Example Runner ###
+### Turn-Taking Example ###
 ```python
 from retico_core.debug import DebugModule
 from retico_core.audio import MicrophoneModule
-from retico_maai import MaAI
+from retico_maai import TurnTakingModule
 
 mic = MicrophoneModule()
-maai = MaAI(mode='vap', lang='en', frame_rate=10)
+maai = TurnTakingModule(mode='vap_mc', lang='en', frame_rate=10)
 debug = DebugModule(print_payload_only=True)
 
 mic.subscribe(maai)

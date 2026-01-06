@@ -1,5 +1,6 @@
 import numpy as np
 import queue
+import warnings
 from threading import Lock, Thread
 from time import sleep
 from maai import Maai, MaaiInput
@@ -10,11 +11,16 @@ from torch.cuda import is_available
 
 
 class VAPIU(GenericDictIU):
-    """Dictionary IU holding voice activity projections (VAP)."""
+    """
+    Dictionary IU holding voice activity projections (VAP).
+    Payloads are treated as dictionaries of the form:
+
+    {'p_now': [float, float], 'p_future': [float, float], 'vad': [float, float]}
+    """
 
     @staticmethod
     def type():
-        return "VAP IU"
+        return "VAPIU"
 
     def __init__(
             self,
@@ -35,34 +41,52 @@ class VAPIU(GenericDictIU):
         )
 
 
-class MaAI(AbstractModule):
-    _MODE_LIST = [
-        'vap',
-        'vap_mc',
-    ]
-    _LANG_LIST = [
-        'jp',
-        'jp_kyoto',
-        'en',
-        'en_kyoto',
-        'ch',
-        'ch_kyoto',
-        'tri',
-        'tri_kyoto',
-    ]
-    _FRAME_RATES = [
-        5,
-        10,
-        20,
-    ]
+class TurnTakingModule(AbstractModule):
+    _MODE_DICT = {
+        'default': 'vap_mc',
+        'vap_mc': {
+            'default': {
+                'lang': 'en',
+                'rate': 10,
+            },
+            'langs': [
+                'jp',
+                'jp_kyoto',
+                'en',
+                'en_kyoto',
+                'ch',
+                'ch_kyoto',
+                'tri',
+                'tri_kyoto',
+            ],
+            'rates': [5, 10, 20],
+        },
+        'vap': {
+            'default': {
+                'lang': 'en',
+                'rate': 10,
+            },
+            'langs': [
+                'jp',
+                'jp_kyoto',
+                'en',
+                'en_kyoto',
+                'ch',
+                'ch_kyoto',
+                'tri',
+                'tri_kyoto',
+            ],
+            'rates': [5, 10, 20],
+        },
+    }
 
     @staticmethod
     def name():
-        return "MaAI"
+        return "TurnTakingModule"
 
     @staticmethod
     def description():
-        return "Interfacing module for the MaAI software"
+        return "Turn-taking module for MaAI turn-taking models"
 
     @staticmethod
     def input_ius():
@@ -74,19 +98,38 @@ class MaAI(AbstractModule):
 
     def __init__(
             self,
-            mode='vap_mc',
-            lang='en',
-            frame_rate=10,
+            mode=f"{_MODE_DICT['default']}",
+            lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
+            frame_rate=f"{_MODE_DICT[_MODE_DICT['default']]['default']['rate']}",
             max_samples=10,
             **kwargs
     ):
+        """
+        A module for MaAI turn-taking models, that takes in AudioIUs and
+        outputs VAPIUs.
+
+        :param mode: The mode to use for turn-taking predictions.
+        :param lang: The language specification for the given mode.
+        :param frame_rate: The frame rate to use for the given mode.
+        :param max_samples: The max number of audio chunks to queue for predictions.
+        """
         super().__init__(**kwargs)
-        if mode not in self._MODE_LIST:
-            f"mode='{mode}' not supported. Defaulting to '{mode:='vap_mc'}'."
-        if lang not in self._LANG_LIST:
-            f"lang='{lang}' not supported. Defaulting to '{lang:='en'}'."
-        if frame_rate not in self._FRAME_RATES:
-            f"frame_rate={frame_rate} not supported. Defaulting to {frame_rate:=10}."
+        if mode not in self._MODE_DICT.keys():
+            warnings.warn(f"mode='{mode}' not supported")
+            mode = self._MODE_DICT['default']
+            lang = self._MODE_DICT[mode]['default']['lang']
+            frame_rate = self._MODE_DICT[mode]['default']['rate']
+            print(f"WARNING -- Defaulting to mode='{mode}'")
+            print(f"WARNING -- Defaulting to lang='{lang}'")
+            print(f"WARNING -- Defaulting to frame_rate={frame_rate}")
+        if lang not in self._MODE_DICT[mode]['langs']:
+            warnings.warn(f"lang='{lang}' not supported for {mode}")
+            lang = self._MODE_DICT[mode]['default']['lang']
+            print(f"WARNING -- Defaulting to lang='{lang}'")
+        if frame_rate not in self._MODE_DICT[mode]['rates']:
+            warnings.warn(f"frame_rate={frame_rate} not supported for {mode}")
+            frame_rate = self._MODE_DICT[mode]['default']['rate']
+            print(f"WARNING -- Defaulting to frame_rate={frame_rate}")
 
         device = 'cuda' if is_available() else 'cpu'
         self.chunk_size = None
