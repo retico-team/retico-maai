@@ -1,12 +1,13 @@
-import numpy as np
-import queue
 import warnings
+from queue import Queue, Empty
 from threading import Lock, Thread
 from time import sleep
+
+import numpy as np
 from maai import Maai, MaaiInput
 from retico_core import AbstractModule, UpdateMessage, UpdateType
-from retico_core.dialogue import GenericDictIU
 from retico_core.audio import AudioIU
+from retico_core.dialogue import GenericDictIU
 from torch.cuda import is_available
 
 
@@ -79,6 +80,8 @@ class TurnTakingModule(AbstractModule):
             'rates': [5, 10, 20],
         },
     }
+    _MAX_SAMPLES = 10
+    _SLEEP_TIME = 0.05
 
     @staticmethod
     def name():
@@ -101,7 +104,7 @@ class TurnTakingModule(AbstractModule):
             mode=f"{_MODE_DICT['default']}",
             lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
             frame_rate=f"{_MODE_DICT[_MODE_DICT['default']]['default']['rate']}",
-            max_samples=10,
+            max_samples=_MAX_SAMPLES,
             **kwargs
     ):
         """
@@ -114,6 +117,7 @@ class TurnTakingModule(AbstractModule):
         :param max_samples: The max number of audio chunks to queue for predictions.
         """
         super().__init__(**kwargs)
+        if max_samples != self._MAX_SAMPLES: self._MAX_SAMPLES = max_samples
         if mode not in self._MODE_DICT.keys():
             warnings.warn(f"mode='{mode}' not supported")
             mode = self._MODE_DICT['default']
@@ -131,43 +135,65 @@ class TurnTakingModule(AbstractModule):
             frame_rate = self._MODE_DICT[mode]['default']['rate']
             print(f"WARNING -- Defaulting to frame_rate={frame_rate}")
 
-        device = 'cuda' if is_available() else 'cpu'
+        self.mode = mode
+        self.lang = lang
+        self.frame_rate = frame_rate
+        self.device = 'cuda' if is_available() else 'cpu'
+        self.mics = {}
+        self.maai = None
         self.chunk_size = None
         self.zero_chunk = None
-        self.mic = MaaiInput.Chunk()
-        self.zero = MaaiInput.Chunk()
-        self.maai = Maai(
-            mode=mode,
-            lang=lang,
-            frame_rate=frame_rate,
-            audio_ch1=self.mic,
-            audio_ch2=self.zero,
-            device=device
-        )
-        self.maai.start()
-        self.queue = queue.Queue(max_samples)
         self._lock = Lock()
         self._loop = Thread(target=self._maai_loop, daemon=True)
         self._loop_active = True
+        self._channel_buffers = {}
+
+    def setup(self):
+        for buf in self._left_buffers:
+            if buf.provider not in self._channel_buffers.keys():
+                self._channel_buffers[buf.provider] = Queue(self._MAX_SAMPLES)
+                self.mics[buf.provider] = MaaiInput.Chunk()
+
+        if len(self._channel_buffers.keys()) == 0:
+            raise RuntimeWarning("No inputs detected")
+        elif len(self._channel_buffers.keys()) == 1:
+            self._channel_buffers['zero'] = Queue(self._MAX_SAMPLES)
+            self.mics['zero'] = MaaiInput.Chunk()
+        elif len(self._channel_buffers.keys()) > 2:
+            raise RuntimeError(f"Expected 1 or 2 channels, found {len(self._channel_buffers.keys())}")
+
+        self.maai = Maai(
+            mode=self.mode,
+            lang=self.lang,
+            frame_rate=self.frame_rate,
+            audio_ch1=list(self.mics.values())[0],
+            audio_ch2=list(self.mics.values())[1],
+            device=self.device
+        )
+        self.maai.start()
         self._loop.start()
 
     def process_update(self, um):
         for iu, ut in um:
             if ut == UpdateType.ADD:
-                self.queue.put(iu)
+                self._channel_buffers[iu.creator].put(iu)
 
     def _maai_loop(self):
         while True:
             try:
-                iu = self.queue.get_nowait()
+                iu = None
+                for provider, buf in self._channel_buffers.items():
+                    if self.chunk_size is None and provider == 'zero':
+                        # zeroed mic will always come second if it exists, so iu will already be assigned
+                        self.chunk_size = round(iu.nframes * iu.sample_width)
+                        self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
+                        self.mics[provider].put_chunk(self.zero_chunk)
+                    elif provider == 'zero':
+                        self.mics[provider].put_chunk(self.zero_chunk)
+                    else:
+                        iu = buf.get()
+                        self.mics[provider].put_chunk(iu.raw_audio)
 
-                if self.chunk_size is None:
-                    self.chunk_size = round(iu.nframes * iu.sample_width)
-                    self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-                if len(iu.raw_audio) != self.chunk_size: continue
-
-                self.mic.put_chunk(iu.raw_audio)
-                self.zero.put_chunk(self.zero_chunk)
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
                     new_iu = self.create_iu()
@@ -178,9 +204,8 @@ class TurnTakingModule(AbstractModule):
                     }
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
-            except queue.Empty:
-                sleep(0.1)
-                continue
+            except Empty:
+                sleep(self._SLEEP_TIME)
             finally:
                 self._lock.acquire()
                 if not self._loop_active: break
