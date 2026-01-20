@@ -149,6 +149,11 @@ class TurnTakingModule(AbstractModule):
         self._channel_buffers = {}
 
     def setup(self):
+        """
+        Infers audio sources from subscribed modules and starts MaAI inference loop.
+        Initializes audio channel buffers and MaAI microphones for storing IUs and
+        performing inference.
+        """
         for buf in self._left_buffers:
             if buf.provider not in self._channel_buffers.keys():
                 self._channel_buffers[buf.provider] = Queue(self._MAX_SAMPLES)
@@ -179,6 +184,7 @@ class TurnTakingModule(AbstractModule):
                 self._channel_buffers[iu.creator].put(iu)
 
     def _maai_loop(self):
+        """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
         while True:
             try:
                 iu = None
@@ -197,10 +203,14 @@ class TurnTakingModule(AbstractModule):
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
                     new_iu = self.create_iu()
+
                     new_iu.payload = {
-                        'p_now': result['p_now'],
-                        'p_future': result['p_future'],
-                        'vad': result['vad'],
+                        f'{provider} ({idx+1})': {
+                            'module': provider,
+                            'p_now': result['p_now'][idx],
+                            'p_future': result['p_future'][idx],
+                            'vad': result['vad'][idx]
+                        } for idx, provider in enumerate(self._channel_buffers.keys())
                     }
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
