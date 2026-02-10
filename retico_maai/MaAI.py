@@ -1,5 +1,6 @@
 import warnings
-from queue import Queue, Empty
+from queue import Empty
+from collections import deque
 from threading import Lock, Thread
 from time import sleep
 
@@ -82,6 +83,7 @@ class TurnTakingModule(AbstractModule):
     }
     _MAX_SAMPLES = 10
     _SLEEP_TIME = 0.05
+    _DESYNC = 0.1  # 100ms desync tolerance default
 
     @staticmethod
     def name():
@@ -105,6 +107,7 @@ class TurnTakingModule(AbstractModule):
             lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
             frame_rate=f"{_MODE_DICT[_MODE_DICT['default']]['default']['rate']}",
             max_samples=_MAX_SAMPLES,
+            desync_tolerance=_DESYNC,
             **kwargs
     ):
         """
@@ -117,7 +120,8 @@ class TurnTakingModule(AbstractModule):
         :param max_samples: The max number of audio chunks to queue for predictions.
         """
         super().__init__(**kwargs)
-        if max_samples != self._MAX_SAMPLES: self._MAX_SAMPLES = max_samples
+        self.max_samples = max_samples
+        self.desync_tolerance = desync_tolerance
         if mode not in self._MODE_DICT.keys():
             warnings.warn(f"mode='{mode}' not supported")
             mode = self._MODE_DICT['default']
@@ -155,12 +159,12 @@ class TurnTakingModule(AbstractModule):
         """
         for buf in self._left_buffers:
             if buf.provider not in self._channels.keys():
-                self._channels[buf.provider] = [Queue(self._MAX_SAMPLES), MaaiInput.Chunk()]
+                self._channels[buf.provider] = [deque(maxlen=self.max_samples), MaaiInput.Chunk()]
 
         if len(self._channels.keys()) == 0:
             raise RuntimeError("No inputs detected")
         elif len(self._channels.keys()) == 1:
-            self._channels['null'] = [Queue(self._MAX_SAMPLES), MaaiInput.Chunk()]
+            self._channels['null'] = [deque(maxlen=self.max_samples), MaaiInput.Chunk()]
         elif len(self._channels.keys()) > 2:
             raise RuntimeError(f"Expected 1 or 2 channels, found {len(self._channels.keys())}")
 
@@ -180,25 +184,63 @@ class TurnTakingModule(AbstractModule):
     def process_update(self, um):
         for iu, ut in um:
             if ut == UpdateType.ADD:
-                self._channels[iu.creator][0].put(iu)
+                with self._lock: self._channels[iu.creator][0].appendleft(iu)
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
         while True:
             try:
-                iu = None
-                for provider, lst in self._channels.items():
-                    buf, mic = lst
-                    if self.chunk_size is None and provider == 'zero':
-                        # zeroed mic will always come second if it exists, so iu will already be assigned
-                        self.chunk_size = round(iu.nframes * iu.sample_width)
+                chan1_vals, chan2_vals = list(self._channels.items())
+                provider1, provider2 = chan1_vals[0], chan2_vals[0]
+                lst1, lst2 = chan1_vals[1], chan2_vals[1]
+                buf1, mic1 = lst1
+                buf2, mic2 = lst2
+
+                if provider2 != 'null':  # we're working with 2 channels
+                    if len(buf1) == 0 or len(buf2) == 0:
+                        sleep(self._SLEEP_TIME)
+                        continue
+
+                    with self._lock:
+                        iu1, iu2 = buf1.pop(), buf2.pop()
+
+                        # calculate chunk_size and zero_chunk if not already
+                        if self.chunk_size is None:
+                            self.chunk_size = round(iu1.nframes * iu1.sample_width)
+                            self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
+
+                        ts1 = iu1.meta_data['origin_timestamp']
+                        ts2 = iu2.meta_data['origin_timestamp']
+                        diff = ts1 - ts2
+
+                        if abs(diff) > self.desync_tolerance and diff < 0:
+                            # ts1 is older than ts2, so process ts1 and put ts2 back
+                            buf2.append(iu2)
+                            mic1.put_chunk(iu1.raw_audio)
+                            mic2.put_chunk(self.zero_chunk)
+                        elif abs(diff) > self.desync_tolerance and diff > 0:
+                            # ts1 is younger than ts2, so put ts1 back and process ts2
+                            buf1.append(iu1)
+                            mic1.put_chunk(self.zero_chunk)
+                            mic2.put_chunk(iu2.raw_audio)
+                        else:
+                            # ts1 and ts2 are in sync, so process both
+                            mic1.put_chunk(iu1.raw_audio)
+                            mic2.put_chunk(iu2.raw_audio)
+                else:  # we're only working with one channel
+                    if len(buf1) == 0:
+                        sleep(self._SLEEP_TIME)
+                        continue
+
+                    iu1 = buf1.pop()
+
+                    # calculate chunk_size and zero_chunk if not already
+                    if self.chunk_size is None:
+                        self.chunk_size = round(iu1.nframes * iu1.sample_width)
                         self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-                        mic.put_chunk(self.zero_chunk)
-                    elif provider == 'zero':
-                        mic.put_chunk(self.zero_chunk)
-                    else:
-                        iu = buf.get()
-                        mic.put_chunk(iu.raw_audio)
+
+                    mic1.put_chunk(iu1.raw_audio)
+                    mic2.put_chunk(self.zero_chunk)
 
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
