@@ -139,14 +139,13 @@ class TurnTakingModule(AbstractModule):
         self.lang = lang
         self.frame_rate = frame_rate
         self.device = 'cuda' if is_available() else 'cpu'
-        self.mics = {}
         self.maai = None
         self.chunk_size = None
         self.zero_chunk = None
         self._lock = Lock()
         self._loop = Thread(target=self._maai_loop, daemon=True)
         self._loop_active = True
-        self._channel_buffers = {}
+        self._channels = {}
 
     def setup(self):
         """
@@ -155,24 +154,24 @@ class TurnTakingModule(AbstractModule):
         performing inference.
         """
         for buf in self._left_buffers:
-            if buf.provider not in self._channel_buffers.keys():
-                self._channel_buffers[buf.provider] = Queue(self._MAX_SAMPLES)
-                self.mics[buf.provider] = MaaiInput.Chunk()
+            if buf.provider not in self._channels.keys():
+                self._channels[buf.provider] = [Queue(self._MAX_SAMPLES), MaaiInput.Chunk()]
 
-        if len(self._channel_buffers.keys()) == 0:
-            raise RuntimeWarning("No inputs detected")
-        elif len(self._channel_buffers.keys()) == 1:
-            self._channel_buffers['zero'] = Queue(self._MAX_SAMPLES)
-            self.mics['zero'] = MaaiInput.Chunk()
-        elif len(self._channel_buffers.keys()) > 2:
-            raise RuntimeError(f"Expected 1 or 2 channels, found {len(self._channel_buffers.keys())}")
+        if len(self._channels.keys()) == 0:
+            raise RuntimeError("No inputs detected")
+        elif len(self._channels.keys()) == 1:
+            self._channels['null'] = [Queue(self._MAX_SAMPLES), MaaiInput.Chunk()]
+        elif len(self._channels.keys()) > 2:
+            raise RuntimeError(f"Expected 1 or 2 channels, found {len(self._channels.keys())}")
 
+        ch1, ch2 = self._channels.keys()
+        ch1, ch2 = self._channels[ch1][1], self._channels[ch2][1]
         self.maai = Maai(
             mode=self.mode,
             lang=self.lang,
             frame_rate=self.frame_rate,
-            audio_ch1=list(self.mics.values())[0],
-            audio_ch2=list(self.mics.values())[1],
+            audio_ch1=ch1,
+            audio_ch2=ch2,
             device=self.device
         )
         self.maai.start()
@@ -181,48 +180,47 @@ class TurnTakingModule(AbstractModule):
     def process_update(self, um):
         for iu, ut in um:
             if ut == UpdateType.ADD:
-                self._channel_buffers[iu.creator].put(iu)
+                self._channels[iu.creator][0].put(iu)
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
         while True:
             try:
                 iu = None
-                for provider, buf in self._channel_buffers.items():
+                for provider, lst in self._channels.items():
+                    buf, mic = lst
                     if self.chunk_size is None and provider == 'zero':
                         # zeroed mic will always come second if it exists, so iu will already be assigned
                         self.chunk_size = round(iu.nframes * iu.sample_width)
                         self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-                        self.mics[provider].put_chunk(self.zero_chunk)
+                        mic.put_chunk(self.zero_chunk)
                     elif provider == 'zero':
-                        self.mics[provider].put_chunk(self.zero_chunk)
+                        mic.put_chunk(self.zero_chunk)
                     else:
                         iu = buf.get()
-                        self.mics[provider].put_chunk(iu.raw_audio)
+                        mic.put_chunk(iu.raw_audio)
 
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
                     new_iu = self.create_iu()
-
                     new_iu.payload = {
-                        f'{provider} ({idx+1})': {
+                        f'{provider} ({idx + 1})': {
                             'module': provider,
                             'p_now': result['p_now'][idx],
                             'p_future': result['p_future'][idx],
                             'vad': result['vad'][idx]
-                        } for idx, provider in enumerate(self._channel_buffers.keys())
+                        } for idx, provider in enumerate(self._channels.keys())
                     }
+                    new_iu.meta_data['origin_timestamp'] = new_iu.created_at
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
             except Empty:
                 sleep(self._SLEEP_TIME)
             finally:
-                self._lock.acquire()
-                if not self._loop_active: break
-                self._lock.release()
+                with self._lock:
+                    if not self._loop_active: break
 
     def shutdown(self):
-        self._lock.acquire()
-        self._loop_active = False
-        self._lock.release()
+        with self._lock:
+            self._loop_active = False
         self._loop.join()
