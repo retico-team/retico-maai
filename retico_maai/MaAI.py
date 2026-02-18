@@ -1,15 +1,31 @@
+import multiprocessing as mp
+import queue
 import warnings
-from queue import Empty
 from collections import deque
+from queue import Empty
 from threading import Lock, Thread
-from time import sleep
+from time import sleep, time
 
+import matplotlib.pyplot as plt
 import numpy as np
-from maai import Maai, MaaiInput
+from maai import Maai, MaaiInput, MaaiOutput
 from retico_core import AbstractModule, UpdateMessage, UpdateType
 from retico_core.audio import AudioIU
 from retico_core.dialogue import GenericDictIU
 from torch.cuda import is_available
+
+
+def _run_visualization(viz_type, plot_queue, heartbeat, heartbeat_timeout):
+    output = viz_type()
+    while time() - heartbeat.value < heartbeat_timeout:
+        try:
+            result = plot_queue.get(timeout=0.05)
+            if result is None:  # shutdown sentinel
+                break
+            output.update(result)
+        except queue.Empty:
+            plt.pause(0.01)
+    print("Heartbeat died")
 
 
 class VAPIU(GenericDictIU):
@@ -83,7 +99,8 @@ class TurnTakingModule(AbstractModule):
     }
     _MAX_SAMPLES = 10
     _SLEEP_TIME = 0.05
-    _DESYNC = 0.1  # 100ms desync tolerance default
+    _DESYNC = 0.1  # desync tolerance
+    _HEARTBEAT_TIMEOUT = 5  # timeout for visualization heartbeat
 
     @staticmethod
     def name():
@@ -143,13 +160,25 @@ class TurnTakingModule(AbstractModule):
         self.lang = lang
         self.frame_rate = frame_rate
         self.device = 'cuda' if is_available() else 'cpu'
+
         self.maai = None
         self.chunk_size = None
         self.zero_chunk = None
+        self._channels = {}
+
         self._lock = Lock()
         self._loop = Thread(target=self._maai_loop, daemon=True)
         self._loop_active = True
-        self._channels = {}
+
+        self._plot_queue = mp.Queue()
+        self.viz_type = MaaiOutput.GuiPlot
+        self._viz_heartbeat = mp.Value('f', time())
+        self._viz_process = mp.Process(
+            target=_run_visualization,
+            args=(self.viz_type, self._plot_queue, self._viz_heartbeat, self._HEARTBEAT_TIMEOUT,),
+            daemon=True,
+            name="MaAI-Visualization"
+        )
 
     def setup(self):
         """
@@ -182,12 +211,15 @@ class TurnTakingModule(AbstractModule):
         self._loop.start()
 
     def process_update(self, um):
+        self._viz_heartbeat.value = time()
         for iu, ut in um:
             if ut == UpdateType.ADD:
                 with self._lock: self._channels[iu.creator][0].appendleft(iu)
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
+        self._viz_heartbeat.value = time()
+        self._viz_process.start()
         while True:
             try:
                 chan1_vals, chan2_vals = list(self._channels.items())
@@ -209,8 +241,8 @@ class TurnTakingModule(AbstractModule):
                             self.chunk_size = round(iu1.nframes * iu1.sample_width)
                             self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
 
-                        ts1 = iu1.meta_data['origin_timestamp']
-                        ts2 = iu2.meta_data['origin_timestamp']
+                        ts1 = iu1.meta_data['producing_module_timestamp']
+                        ts2 = iu2.meta_data['producing_module_timestamp']
                         diff = ts1 - ts2
 
                         if abs(diff) > self.desync_tolerance and diff < 0:
@@ -253,9 +285,10 @@ class TurnTakingModule(AbstractModule):
                             'vad': result['vad'][idx]
                         } for idx, provider in enumerate(self._channels.keys())
                     }
-                    new_iu.meta_data['origin_timestamp'] = new_iu.created_at
+                    new_iu.meta_data['producing_module_timestamp'] = new_iu.created_at
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
+                    self._plot_queue.put(result)
             except Empty:
                 sleep(self._SLEEP_TIME)
             finally:
@@ -263,6 +296,7 @@ class TurnTakingModule(AbstractModule):
                     if not self._loop_active: break
 
     def shutdown(self):
+        self._viz_process.kill()
         with self._lock:
             self._loop_active = False
-        self._loop.join()
+        # self._loop.join()
