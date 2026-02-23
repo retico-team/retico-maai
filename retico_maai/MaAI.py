@@ -4,9 +4,8 @@ import warnings
 from collections import deque
 from queue import Empty
 from threading import Lock, Thread
-from time import sleep, time
+from time import sleep
 
-import matplotlib.pyplot as plt
 import numpy as np
 from maai import Maai, MaaiInput, MaaiOutput
 from retico_core import AbstractModule, UpdateMessage, UpdateType
@@ -14,18 +13,19 @@ from retico_core.audio import AudioIU
 from retico_core.dialogue import GenericDictIU
 from torch.cuda import is_available
 
+_SLEEP_TIME = 0.05
 
-def _run_visualization(viz_type, plot_queue, heartbeat, heartbeat_timeout):
-    output = viz_type()
-    while time() - heartbeat.value < heartbeat_timeout:
+
+def _run_visualization(viz_type, plot_queue, liveness):
+    output = viz_type() if viz_type is not None else None
+    while not liveness.poll():
         try:
             result = plot_queue.get(timeout=0.05)
-            if result is None:  # shutdown sentinel
-                break
-            output.update(result)
+            if result is None: break
+            if output is not None: output.update(result)
         except queue.Empty:
-            plt.pause(0.01)
-    print("Heartbeat died")
+            sleep(_SLEEP_TIME)
+            continue
 
 
 class VAPIU(GenericDictIU):
@@ -97,10 +97,13 @@ class TurnTakingModule(AbstractModule):
             'rates': [5, 10, 20],
         },
     }
+    _VIZ_TYPES = {
+        'gui_bar': MaaiOutput.GuiBar,
+        'gui_plot': MaaiOutput.GuiPlot,
+        'console_bar': MaaiOutput.ConsoleBar,
+    }
     _MAX_SAMPLES = 10
-    _SLEEP_TIME = 0.05
     _DESYNC = 0.1  # desync tolerance
-    _HEARTBEAT_TIMEOUT = 5  # timeout for visualization heartbeat
 
     @staticmethod
     def name():
@@ -123,6 +126,7 @@ class TurnTakingModule(AbstractModule):
             mode=f"{_MODE_DICT['default']}",
             lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
             frame_rate=f"{_MODE_DICT[_MODE_DICT['default']]['default']['rate']}",
+            viz_type=None,
             max_samples=_MAX_SAMPLES,
             desync_tolerance=_DESYNC,
             **kwargs
@@ -134,7 +138,9 @@ class TurnTakingModule(AbstractModule):
         :param mode: The mode to use for turn-taking predictions.
         :param lang: The language specification for the given mode.
         :param frame_rate: The frame rate to use for the given mode.
+        :param viz_type: The MaaiOutput class to use.
         :param max_samples: The max number of audio chunks to queue for predictions.
+        :param desync_tolerance: The tolerance for audio desynchronization.
         """
         super().__init__(**kwargs)
         self.max_samples = max_samples
@@ -171,11 +177,11 @@ class TurnTakingModule(AbstractModule):
         self._loop_active = True
 
         self._plot_queue = mp.Queue()
-        self.viz_type = MaaiOutput.GuiPlot
-        self._viz_heartbeat = mp.Value('f', time())
+        self._viz_type = self._VIZ_TYPES[viz_type] if viz_type in self._VIZ_TYPES else None
+        _viz_liveness_r, self._viz_liveness_w = mp.Pipe(duplex=False)
         self._viz_process = mp.Process(
             target=_run_visualization,
-            args=(self.viz_type, self._plot_queue, self._viz_heartbeat, self._HEARTBEAT_TIMEOUT,),
+            args=(self._viz_type, self._plot_queue, _viz_liveness_r),
             daemon=True,
             name="MaAI-Visualization"
         )
@@ -211,14 +217,12 @@ class TurnTakingModule(AbstractModule):
         self._loop.start()
 
     def process_update(self, um):
-        self._viz_heartbeat.value = time()
         for iu, ut in um:
             if ut == UpdateType.ADD:
                 with self._lock: self._channels[iu.creator][0].appendleft(iu)
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
-        self._viz_heartbeat.value = time()
         self._viz_process.start()
         while True:
             try:
@@ -230,7 +234,7 @@ class TurnTakingModule(AbstractModule):
 
                 if provider2 != 'null':  # we're working with 2 channels
                     if len(buf1) == 0 or len(buf2) == 0:
-                        sleep(self._SLEEP_TIME)
+                        sleep(_SLEEP_TIME)
                         continue
 
                     with self._lock:
@@ -261,7 +265,7 @@ class TurnTakingModule(AbstractModule):
                             mic2.put_chunk(iu2.raw_audio)
                 else:  # we're only working with one channel
                     if len(buf1) == 0:
-                        sleep(self._SLEEP_TIME)
+                        sleep(_SLEEP_TIME)
                         continue
 
                     iu1 = buf1.pop()
@@ -285,18 +289,17 @@ class TurnTakingModule(AbstractModule):
                             'vad': result['vad'][idx]
                         } for idx, provider in enumerate(self._channels.keys())
                     }
-                    new_iu.meta_data['producing_module_timestamp'] = new_iu.created_at
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
                     self._plot_queue.put(result)
             except Empty:
-                sleep(self._SLEEP_TIME)
+                sleep(_SLEEP_TIME)
             finally:
                 with self._lock:
                     if not self._loop_active: break
 
     def shutdown(self):
-        self._viz_process.kill()
+        self._viz_liveness_w.close()
+        self._plot_queue.put(None)
         with self._lock:
             self._loop_active = False
-        # self._loop.join()
