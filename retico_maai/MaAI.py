@@ -3,7 +3,7 @@ import queue
 import warnings
 from collections import deque
 from queue import Empty
-from threading import Lock, Thread
+from threading import Event, Thread
 from time import sleep
 
 import numpy as np
@@ -13,7 +13,7 @@ from retico_core.audio import AudioIU
 from retico_core.dialogue import GenericDictIU
 from torch.cuda import is_available
 
-_SLEEP_TIME = 0.05
+_SLEEP_TIME = 0.02
 
 
 def _run_visualization(viz_type, plot_queue, liveness):
@@ -172,9 +172,8 @@ class TurnTakingModule(AbstractModule):
         self.zero_chunk = None
         self._channels = {}
 
-        self._lock = Lock()
+        self._stop_event = Event()
         self._loop = Thread(target=self._maai_loop, daemon=True)
-        self._loop_active = True
 
         self._plot_queue = mp.Queue()
         self._viz_type = self._VIZ_TYPES[viz_type] if viz_type in self._VIZ_TYPES else None
@@ -215,66 +214,40 @@ class TurnTakingModule(AbstractModule):
         )
         self.maai.start()
         self._loop.start()
+        self._sync.start()
 
     def process_update(self, um):
         for iu, ut in um:
             if ut == UpdateType.ADD:
-                with self._lock: self._channels[iu.creator][0].appendleft(iu)
+                if 'zmq_creator' in iu.meta_data:
+                    self._channels[iu.meta_data['zmq_creator']][0].appendleft(iu)
+                else:
+                    self._channels[iu.creator][0].appendleft(iu)
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
         self._viz_process.start()
-        while True:
+        while not self._stop_event.is_set():
             try:
-                chan1_vals, chan2_vals = list(self._channels.items())
-                provider1, provider2 = chan1_vals[0], chan2_vals[0]
-                lst1, lst2 = chan1_vals[1], chan2_vals[1]
-                buf1, mic1 = lst1
-                buf2, mic2 = lst2
+                ch1, ch2 = list(self._channels.items())
+                buf1, mic1 = ch1[1]
+                buf2, mic2 = ch2[1]
 
-                if provider2 != 'null':  # we're working with 2 channels
-                    if len(buf1) == 0 or len(buf2) == 0:
-                        sleep(_SLEEP_TIME)
+                if ch2[0] != 'null':  # we're working with 2 channels
+                    if buf1 and buf2:
+                        mic1.put_chunk(buf1.pop().raw_audio)
+                        mic2.put_chunk(buf2.pop().raw_audio)
+                    else:
                         continue
-
-                    with self._lock:
-                        iu1, iu2 = buf1.pop(), buf2.pop()
-
-                        # calculate chunk_size and zero_chunk if not already
-                        if self.chunk_size is None:
-                            self.chunk_size = round(iu1.nframes * iu1.sample_width)
-                            self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-
-                        ts1 = iu1.meta_data['producing_module_timestamp']
-                        ts2 = iu2.meta_data['producing_module_timestamp']
-                        diff = ts1 - ts2
-
-                        if abs(diff) > self.desync_tolerance and diff < 0:
-                            # ts1 is older than ts2, so process ts1 and put ts2 back
-                            buf2.append(iu2)
-                            mic1.put_chunk(iu1.raw_audio)
-                            mic2.put_chunk(self.zero_chunk)
-                        elif abs(diff) > self.desync_tolerance and diff > 0:
-                            # ts1 is younger than ts2, so put ts1 back and process ts2
-                            buf1.append(iu1)
-                            mic1.put_chunk(self.zero_chunk)
-                            mic2.put_chunk(iu2.raw_audio)
-                        else:
-                            # ts1 and ts2 are in sync, so process both
-                            mic1.put_chunk(iu1.raw_audio)
-                            mic2.put_chunk(iu2.raw_audio)
                 else:  # we're only working with one channel
                     if len(buf1) == 0:
                         sleep(_SLEEP_TIME)
                         continue
 
                     iu1 = buf1.pop()
-
-                    # calculate chunk_size and zero_chunk if not already
                     if self.chunk_size is None:
                         self.chunk_size = round(iu1.nframes * iu1.sample_width)
                         self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-
                     mic1.put_chunk(iu1.raw_audio)
                     mic2.put_chunk(self.zero_chunk)
 
@@ -294,12 +267,8 @@ class TurnTakingModule(AbstractModule):
                     self._plot_queue.put(result)
             except Empty:
                 sleep(_SLEEP_TIME)
-            finally:
-                with self._lock:
-                    if not self._loop_active: break
 
     def shutdown(self):
         self._viz_liveness_w.close()
         self._plot_queue.put(None)
-        with self._lock:
-            self._loop_active = False
+        self._stop_event.set()
