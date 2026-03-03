@@ -13,7 +13,7 @@ from retico_core.audio import AudioIU
 from retico_core.dialogue import GenericDictIU
 from torch.cuda import is_available
 
-_SLEEP_TIME = 0.02
+_SLEEP_TIME = 0.05
 
 
 def _run_visualization(viz_type, plot_queue, liveness):
@@ -103,7 +103,7 @@ class TurnTakingModule(AbstractModule):
         'console_bar': MaaiOutput.ConsoleBar,
     }
     _MAX_SAMPLES = 10
-    _DESYNC = 0.1  # desync tolerance
+    _DESYNC = 3  # desync tolerance
 
     @staticmethod
     def name():
@@ -214,7 +214,6 @@ class TurnTakingModule(AbstractModule):
         )
         self.maai.start()
         self._loop.start()
-        self._sync.start()
 
     def process_update(self, um):
         for iu, ut in um:
@@ -235,8 +234,8 @@ class TurnTakingModule(AbstractModule):
 
                 if ch2[0] != 'null':  # we're working with 2 channels
                     if buf1 and buf2:
-                        mic1.put_chunk(buf1.pop().raw_audio)
-                        mic2.put_chunk(buf2.pop().raw_audio)
+                        mic1.put_chunk(np.frombuffer(buf1.pop().raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
+                        mic2.put_chunk(np.frombuffer(buf2.pop().raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
                     else:
                         continue
                 else:  # we're only working with one channel
@@ -246,9 +245,8 @@ class TurnTakingModule(AbstractModule):
 
                     iu1 = buf1.pop()
                     if self.chunk_size is None:
-                        self.chunk_size = round(iu1.nframes * iu1.sample_width)
-                        self.zero_chunk = np.zeros(self.chunk_size, dtype=np.float32)
-                    mic1.put_chunk(iu1.raw_audio)
+                        self.zero_chunk = np.zeros(iu1.nframes, dtype=np.float32)
+                    mic1.put_chunk(np.frombuffer(iu1.raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
                     mic2.put_chunk(self.zero_chunk)
 
                 result = self.maai.result_dict_queue.get_nowait()
