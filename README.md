@@ -32,6 +32,12 @@ maai.stop()
 debug.stop()
 ```
 
+#### *Note ####
+Using this module with [retico-zmq](https://github.com/retico-team/retico-zmq) can cause time alignment issues. To avoid
+this, the runner housing the TurnTakingModule should be given ample time to perform setup before any other runners it
+depends on for input are started. Additionally, the clocks for each machine hosting a runner should be synchronized as
+this module uses timestamps for synchronizing audio input.
+
 ### Citations ###
 Koji Inoue, Bing'er Jiang, Erik Ekstedt, Tatsuya Kawahara, Gabriel Skantze
 **Real-time and Continuous Turn-taking Prediction Using Voice Activity Projection**
