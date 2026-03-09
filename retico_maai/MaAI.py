@@ -125,7 +125,7 @@ class TurnTakingModule(AbstractModule):
             self,
             mode=f"{_MODE_DICT['default']}",
             lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
-            frame_rate=f"{_MODE_DICT[_MODE_DICT['default']]['default']['rate']}",
+            frame_rate=_MODE_DICT[_MODE_DICT['default']]['default']['rate'],
             viz_type=None,
             max_samples=_MAX_SAMPLES,
             desync_tolerance=_DESYNC,
