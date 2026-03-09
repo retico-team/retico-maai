@@ -1,6 +1,7 @@
 import multiprocessing as mp
 import queue
 import warnings
+from abc import ABC, abstractmethod
 from collections import deque
 from queue import Empty
 from threading import Event, Thread
@@ -28,7 +29,16 @@ def _run_visualization(viz_type, plot_queue, liveness):
             continue
 
 
-class VAPIU(GenericDictIU):
+class MaaiIU(GenericDictIU, ABC):
+    """
+    Abstract dictionary IU for holding MaAI output.
+    """
+
+    @abstractmethod
+    def set_payload(self, provider_iter, payload): pass
+
+
+class VAPIU(MaaiIU):
     """
     Dictionary IU holding voice activity projections (VAP).
     Payloads are treated as dictionaries of the form:
@@ -40,28 +50,52 @@ class VAPIU(GenericDictIU):
     def type():
         return "VAPIU"
 
-    def __init__(
-            self,
-            creator=None,
-            iuid=0,
-            previous_iu=None,
-            grounded_in=None,
-            payload=None,
-            **kwargs
-    ):
-        super().__init__(
-            creator=creator,
-            iuid=iuid,
-            previous_iu=previous_iu,
-            grounded_in=grounded_in,
-            payload=payload,
-            **kwargs
-        )
+    def set_payload(self, provider_iter, payload):
+        self.payload = {
+            f'{provider} ({idx + 1})': {
+                'module': provider,
+                'p_now': payload['p_now'][idx],
+                'p_future': payload['p_future'][idx],
+                'vad': payload['vad'][idx]
+            } for idx, provider in provider_iter
+        }
 
 
-class TurnTakingModule(AbstractModule):
+class BackchannelIU(MaaiIU):
+    """
+    Dictionary IU holding system backchannel timings.
+    """
+
+    @staticmethod
+    def type():
+        return "BackchannelIU"
+
+    def set_payload(self, provider_iter, payload):
+        self.payload = {
+            'p_bc': payload['p_bc'],
+        }
+
+
+class NodIU(MaaiIU):
+    """
+    Dictionary IU holding system nod predictions.
+    """
+
+    @staticmethod
+    def type():
+        return "NodIU"
+
+    def set_payload(self, provider_iter, payload):
+        self.payload = {
+            'p_bc': payload['p_bc'],
+            'p_nod_short': payload['p_nod_short'],
+            'p_nod_long': payload['p_nod_long'],
+            'p_nod_long_p': payload['p_nod_long_p'],
+        }
+
+
+class MaaiBaseModule(AbstractModule):
     _MODE_DICT = {
-        'default': 'vap_mc',
         'vap_mc': {
             'default': {
                 'lang': 'en',
@@ -96,6 +130,29 @@ class TurnTakingModule(AbstractModule):
             ],
             'rates': [5, 10, 20],
         },
+        'bc': {
+            'default': {
+                'lang': 'en',
+                'rate': 10,
+            },
+            'langs': [
+                'jp',
+                'en',
+                'ch',
+                'tri',
+            ],
+            'rates': [5, 10, 20],
+        },
+        'nod': {
+            'default': {
+                'lang': 'jp',
+                'rate': 10,
+            },
+            'langs': [
+                'jp',
+            ],
+            'rates': [5, 10, 20],
+        }
     }
     _VIZ_TYPES = {
         'gui_bar': MaaiOutput.GuiBar,
@@ -103,32 +160,14 @@ class TurnTakingModule(AbstractModule):
         'console_bar': MaaiOutput.ConsoleBar,
     }
     _MAX_SAMPLES = 10
-    _DESYNC = 3  # desync tolerance
-
-    @staticmethod
-    def name():
-        return "TurnTakingModule"
-
-    @staticmethod
-    def description():
-        return "Turn-taking module for MaAI turn-taking models"
-
-    @staticmethod
-    def input_ius():
-        return [AudioIU]
-
-    @staticmethod
-    def output_iu():
-        return VAPIU
 
     def __init__(
             self,
-            mode=f"{_MODE_DICT['default']}",
-            lang=f"{_MODE_DICT[_MODE_DICT['default']]['default']['lang']}",
-            frame_rate=_MODE_DICT[_MODE_DICT['default']]['default']['rate'],
+            mode,
+            lang=None,
+            frame_rate=None,
             viz_type=None,
             max_samples=_MAX_SAMPLES,
-            desync_tolerance=_DESYNC,
             **kwargs
     ):
         """
@@ -136,28 +175,27 @@ class TurnTakingModule(AbstractModule):
         outputs VAPIUs.
 
         :param mode: The mode to use for turn-taking predictions.
-        :param lang: The language specification for the given mode.
-        :param frame_rate: The frame rate to use for the given mode.
+        :param lang: The language specification for the given mode. Defaults to the mode's default lang.
+        :param frame_rate: The frame rate to use for the given mode. Defaults to the mode's default rate.
         :param viz_type: The MaaiOutput class to use.
         :param max_samples: The max number of audio chunks to queue for predictions.
-        :param desync_tolerance: The tolerance for audio desynchronization.
         """
         super().__init__(**kwargs)
         self.max_samples = max_samples
-        self.desync_tolerance = desync_tolerance
+
         if mode not in self._MODE_DICT.keys():
-            warnings.warn(f"mode='{mode}' not supported")
-            mode = self._MODE_DICT['default']
+            raise RuntimeError(f"mode='{mode}' not one of {list(self._MODE_DICT.keys())}")
+
+        if lang is None:
             lang = self._MODE_DICT[mode]['default']['lang']
-            frame_rate = self._MODE_DICT[mode]['default']['rate']
-            print(f"WARNING -- Defaulting to mode='{mode}'")
-            print(f"WARNING -- Defaulting to lang='{lang}'")
-            print(f"WARNING -- Defaulting to frame_rate={frame_rate}")
-        if lang not in self._MODE_DICT[mode]['langs']:
+        elif lang not in self._MODE_DICT[mode]['langs']:
             warnings.warn(f"lang='{lang}' not supported for {mode}")
             lang = self._MODE_DICT[mode]['default']['lang']
             print(f"WARNING -- Defaulting to lang='{lang}'")
-        if frame_rate not in self._MODE_DICT[mode]['rates']:
+
+        if frame_rate is None:
+            frame_rate = self._MODE_DICT[mode]['default']['rate']
+        elif frame_rate not in self._MODE_DICT[mode]['rates']:
             warnings.warn(f"frame_rate={frame_rate} not supported for {mode}")
             frame_rate = self._MODE_DICT[mode]['default']['rate']
             print(f"WARNING -- Defaulting to frame_rate={frame_rate}")
@@ -225,7 +263,8 @@ class TurnTakingModule(AbstractModule):
 
     def _maai_loop(self):
         """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
-        self._viz_process.start()
+        if self._viz_type:
+            self._viz_process.start()
         while not self._stop_event.is_set():
             try:
                 ch1, ch2 = list(self._channels.items())
@@ -252,21 +291,83 @@ class TurnTakingModule(AbstractModule):
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
                     new_iu = self.create_iu()
-                    new_iu.payload = {
-                        f'{provider} ({idx + 1})': {
-                            'module': provider,
-                            'p_now': result['p_now'][idx],
-                            'p_future': result['p_future'][idx],
-                            'vad': result['vad'][idx]
-                        } for idx, provider in enumerate(self._channels.keys())
-                    }
+                    new_iu.set_payload(enumerate(self._channels.keys()), result)
                     um = UpdateMessage.from_iu(new_iu, UpdateType.ADD)
                     self.append(um)
-                    self._plot_queue.put(result)
+                    if self._viz_type:
+                        self._plot_queue.put(result)
             except Empty:
                 sleep(_SLEEP_TIME)
 
     def shutdown(self):
-        self._viz_liveness_w.close()
-        self._plot_queue.put(None)
+        if self._viz_type:
+            self._viz_liveness_w.close()
+            self._plot_queue.put(None)
         self._stop_event.set()
+
+
+class TurnTakingModule(MaaiBaseModule):
+
+    def __init__(self, mode='vap_mc', **kwargs):
+        if mode not in ['vap_mc', 'vap']: raise ValueError(f"Mode must be 'vap' or 'vap_mc', got '{mode}'")
+        super().__init__(mode=mode, **kwargs)
+
+    @staticmethod
+    def name():
+        return "TurnTakingModule"
+
+    @staticmethod
+    def description():
+        return "Turn-taking module for MaAI turn-taking models"
+
+    @staticmethod
+    def input_ius():
+        return [AudioIU]
+
+    @staticmethod
+    def output_iu():
+        return VAPIU
+
+
+class BackchannelModule(MaaiBaseModule):
+
+    def __init__(self, **kwargs):
+        super().__init__(mode='bc', **kwargs)
+
+    @staticmethod
+    def name():
+        return "BackchannelModule"
+
+    @staticmethod
+    def description():
+        return "Backchannel module for MaAI models"
+
+    @staticmethod
+    def input_ius():
+        return [AudioIU]
+
+    @staticmethod
+    def output_iu():
+        return BackchannelIU
+
+
+class NodPredictionModule(MaaiBaseModule):
+
+    def __init__(self, **kwargs):
+        super().__init__(mode='nod', **kwargs)
+
+    @staticmethod
+    def name():
+        return "NodPredictionModule"
+
+    @staticmethod
+    def description():
+        return "Nod prediction module for MaAI models"
+
+    @staticmethod
+    def input_ius():
+        return [AudioIU]
+
+    @staticmethod
+    def output_iu():
+        return NodIU
