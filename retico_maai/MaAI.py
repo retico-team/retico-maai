@@ -64,6 +64,9 @@ class VAPIU(MaaiIU):
 class BackchannelIU(MaaiIU):
     """
     Dictionary IU holding system backchannel timings.
+    Payloads are treated as dictionaries of the form:
+
+    {'p_bc': float}
     """
 
     @staticmethod
@@ -79,6 +82,9 @@ class BackchannelIU(MaaiIU):
 class NodIU(MaaiIU):
     """
     Dictionary IU holding system nod predictions.
+    Payloads are treated as dictionaries of the form:
+
+    {'p_bc': float, 'p_nod_short': float, 'p_nod_long': float, 'p_nod_long_p': float}
     """
 
     @staticmethod
@@ -171,13 +177,12 @@ class MaaiBaseModule(AbstractModule):
             **kwargs
     ):
         """
-        A module for MaAI turn-taking models, that takes in AudioIUs and
-        outputs VAPIUs.
+        Abstract base module for MaAI models.
 
-        :param mode: The mode to use for turn-taking predictions.
-        :param lang: The language specification for the given mode. Defaults to the mode's default lang.
-        :param frame_rate: The frame rate to use for the given mode. Defaults to the mode's default rate.
-        :param viz_type: The MaaiOutput class to use.
+        :param mode: The prediction mode to use (i.e. vap | bc | nod).
+        :param lang: The language specification for the given mode. Defaults are set in _MODE_DICT per mode.
+        :param frame_rate: The frame rate to use for the given mode. Defaults are set in _MODE_DICT.
+        :param viz_type: The MaaiOutput class to use (i.e. plot | bar | console).
         :param max_samples: The max number of audio chunks to queue for predictions.
         """
         super().__init__(**kwargs)
@@ -262,7 +267,7 @@ class MaaiBaseModule(AbstractModule):
                     self._channels[iu.creator][0].appendleft(iu)
 
     def _maai_loop(self):
-        """Consumes IUs from each audio channel buffer and performs turn-taking predictions."""
+        """Consumes IUs from each audio channel buffer and passes their audio chunks to MaAI."""
         if self._viz_type:
             self._viz_process.start()
         while not self._stop_event.is_set():
