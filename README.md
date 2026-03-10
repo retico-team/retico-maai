@@ -15,7 +15,7 @@ from retico_core.audio import MicrophoneModule
 from retico_maai import TurnTakingModule
 
 mic = MicrophoneModule()
-maai = TurnTakingModule(mode='vap_mc', lang='en', frame_rate=10)
+maai = TurnTakingModule(mode='vap_mc', lang='en', frame_rate=10, viz_type='gui_plot')
 debug = DebugModule(print_payload_only=True)
 
 mic.subscribe(maai)
@@ -37,6 +37,54 @@ Using this module with [retico-zmq](https://github.com/retico-team/retico-zmq) c
 this, the runner housing the TurnTakingModule should be given ample time to perform setup before any other runners it
 depends on for input are started. Additionally, the clocks for each machine hosting a runner should be synchronized as
 this module uses timestamps for synchronizing audio input.
+
+### Backchannel Example ###
+```python
+from retico_core.debug import DebugModule
+from retico_core.audio import MicrophoneModule
+from retico_maai import BackchannelModule
+
+mic = MicrophoneModule()
+maai = BackchannelModule(lang='en', frame_rate=10, viz_type='gui_plot')
+debug = DebugModule(print_payload_only=True)
+
+mic.subscribe(maai)
+maai.subscribe(debug)
+
+mic.run()
+maai.run()
+debug.run()
+
+input()
+
+mic.stop()
+maai.stop()
+debug.stop()
+```
+
+### Nod Prediction Example ###
+```python
+from retico_core.debug import DebugModule
+from retico_core.audio import MicrophoneModule
+from retico_maai import NodPredictionModule
+
+mic = MicrophoneModule()
+maai = NodPredictionModule(viz_type='gui_plot')
+debug = DebugModule(print_payload_only=True)
+
+mic.subscribe(maai)
+maai.subscribe(debug)
+
+mic.run()
+maai.run()
+debug.run()
+
+input()
+
+mic.stop()
+maai.stop()
+debug.stop()
+```
 
 ### Citations ###
 Koji Inoue, Bing'er Jiang, Erik Ekstedt, Tatsuya Kawahara, Gabriel Skantze
