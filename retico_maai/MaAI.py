@@ -2,9 +2,8 @@ import multiprocessing as mp
 import queue
 import warnings
 from abc import ABC, abstractmethod
-from collections import deque
 from queue import Empty
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from time import sleep
 
 import numpy as np
@@ -52,12 +51,12 @@ class VAPIU(MaaiIU):
 
     def set_payload(self, provider_iter, payload):
         self.payload = {
-            f'{provider} ({idx + 1})': {
-                'module': provider,
+            f'{mod_id} ({idx + 1})': {
+                'module': mod_id,
                 'p_now': payload['p_now'][idx],
                 'p_future': payload['p_future'][idx],
                 'vad': payload['vad'][idx]
-            } for idx, provider in provider_iter
+            } for idx, mod_id in provider_iter
         }
 
 
@@ -165,7 +164,6 @@ class MaaiBaseModule(AbstractModule):
         'gui_plot': MaaiOutput.GuiPlot,
         'console_bar': MaaiOutput.ConsoleBar,
     }
-    _MAX_SAMPLES = 10
 
     def __init__(
             self,
@@ -173,7 +171,6 @@ class MaaiBaseModule(AbstractModule):
             lang=None,
             frame_rate=None,
             viz_type=None,
-            max_samples=_MAX_SAMPLES,
             **kwargs
     ):
         """
@@ -183,10 +180,8 @@ class MaaiBaseModule(AbstractModule):
         :param lang: The language specification for the given mode. Defaults are set in _MODE_DICT per mode.
         :param frame_rate: The frame rate to use for the given mode. Defaults are set in _MODE_DICT.
         :param viz_type: The MaaiOutput class to use (i.e. plot | bar | console).
-        :param max_samples: The max number of audio chunks to queue for predictions.
         """
         super().__init__(**kwargs)
-        self.max_samples = max_samples
 
         if mode not in self._MODE_DICT.keys():
             raise RuntimeError(f"mode='{mode}' not one of {list(self._MODE_DICT.keys())}")
@@ -210,10 +205,20 @@ class MaaiBaseModule(AbstractModule):
         self.frame_rate = frame_rate
         self.device = 'cuda' if is_available() else 'cpu'
 
-        self.maai = None
-        self.chunk_size = None
         self.zero_chunk = None
         self._channels = {}
+        self._channel_lock = Lock()
+        self.channel_cnt = 0
+        self.ch1, self.ch2 = MaaiInput.Chunk(), MaaiInput.Chunk()
+        self.maai = Maai(
+            mode=self.mode,
+            lang=self.lang,
+            frame_rate=self.frame_rate,
+            audio_ch1=self.ch1,
+            audio_ch2=self.ch2,
+            device=self.device
+        )
+        self.maai.start()
 
         self._stop_event = Event()
         self._loop = Thread(target=self._maai_loop, daemon=True)
@@ -229,70 +234,36 @@ class MaaiBaseModule(AbstractModule):
         )
 
     def setup(self):
-        """
-        Infers audio sources from subscribed modules and starts MaAI inference loop.
-        Initializes audio channel buffers and MaAI microphones for storing IUs and
-        performing inference.
-        """
-        for buf in self._left_buffers:
-            if buf.provider not in self._channels.keys():
-                self._channels[buf.provider] = [deque(maxlen=self.max_samples), MaaiInput.Chunk()]
-
-        if len(self._channels.keys()) == 0:
-            raise RuntimeError("No inputs detected")
-        elif len(self._channels.keys()) == 1:
-            self._channels['null'] = [deque(maxlen=self.max_samples), MaaiInput.Chunk()]
-        elif len(self._channels.keys()) > 2:
-            raise RuntimeError(f"Expected 1 or 2 channels, found {len(self._channels.keys())}")
-
-        ch1, ch2 = self._channels.keys()
-        ch1, ch2 = self._channels[ch1][1], self._channels[ch2][1]
-        self.maai = Maai(
-            mode=self.mode,
-            lang=self.lang,
-            frame_rate=self.frame_rate,
-            audio_ch1=ch1,
-            audio_ch2=ch2,
-            device=self.device
-        )
-        self.maai.start()
         self._loop.start()
 
     def process_update(self, um):
         for iu, ut in um:
             if ut == UpdateType.ADD:
-                if 'zmq_creator' in iu.meta_data:
-                    self._channels[iu.meta_data['zmq_creator']][0].appendleft(iu)
-                else:
-                    self._channels[iu.creator][0].appendleft(iu)
+                with self._channel_lock:
+                    try:
+                        chunk = np.frombuffer(iu.raw_audio, dtype=np.int16).astype(np.float32) / 32768.0
+                        self._channels[iu.creator_id].put_chunk(chunk)
+                        if self.channel_cnt == 1:
+                            self.ch2.put_chunk(self.zero_chunk)
+                    except KeyError as e:
+                        match self.channel_cnt:
+                            case 0:
+                                self._channels[iu.creator_id] = self.ch1
+                                self.channel_cnt += 1
+                                self.zero_chunk = np.zeros(iu.nframes, dtype=np.float32)
+                                print(f"Binding channel 1 to {iu.creator_id}")
+                            case 1:
+                                self._channels[iu.creator_id] = self.ch2
+                                self.channel_cnt += 1
+                                print(f"Binding channel 2 to {iu.creator_id}")
+                            case _:
+                                raise RuntimeError(f"Too many channels detected -- {e}")
 
     def _maai_loop(self):
-        """Consumes IUs from each audio channel buffer and passes their audio chunks to MaAI."""
         if self._viz_type:
             self._viz_process.start()
         while not self._stop_event.is_set():
             try:
-                ch1, ch2 = list(self._channels.items())
-                buf1, mic1 = ch1[1]
-                buf2, mic2 = ch2[1]
-
-                if ch2[0] != 'null':  # we're working with 2 channels
-                    if buf1 and buf2:
-                        mic1.put_chunk(np.frombuffer(buf1.pop().raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
-                        mic2.put_chunk(np.frombuffer(buf2.pop().raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
-                    else:
-                        continue
-                else:  # we're only working with one channel
-                    if len(buf1) == 0:
-                        sleep(_SLEEP_TIME)
-                        continue
-
-                    iu1 = buf1.pop()
-                    if self.chunk_size is None:
-                        self.zero_chunk = np.zeros(iu1.nframes, dtype=np.float32)
-                    mic1.put_chunk(np.frombuffer(iu1.raw_audio, dtype=np.int16).astype(np.float32) / 32768.0)
-                    mic2.put_chunk(self.zero_chunk)
-
                 result = self.maai.result_dict_queue.get_nowait()
                 if result:
                     new_iu = self.create_iu()
@@ -309,6 +280,8 @@ class MaaiBaseModule(AbstractModule):
             self._viz_liveness_w.close()
             self._plot_queue.put(None)
         self._stop_event.set()
+        self._loop.join()
+        self.maai.stop()
 
 
 class TurnTakingModule(MaaiBaseModule):
