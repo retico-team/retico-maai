@@ -233,7 +233,8 @@ class MaaiBaseModule(AbstractModule):
             name="MaAI-Visualization"
         )
 
-    def setup(self):
+        self._stop_event = Event()
+        self._loop = Thread(target=self._maai_loop, daemon=True)
         self._loop.start()
 
     def process_update(self, um):
@@ -282,6 +283,8 @@ class MaaiBaseModule(AbstractModule):
         self._stop_event.set()
         self._loop.join()
         self.maai.stop()
+        if self.maai._worker_thread is not None:
+            self.maai._worker_thread.join()
 
 
 class TurnTakingModule(MaaiBaseModule):
