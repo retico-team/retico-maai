@@ -33,10 +33,9 @@ debug.stop()
 ```
 
 #### *Note ####
-Using this module with [retico-zmq](https://github.com/retico-team/retico-zmq) can cause time alignment issues. To avoid
-this, the runner housing the TurnTakingModule should be given ample time to perform setup before any other runners it
-depends on for input are started. Additionally, the clocks for each machine hosting a runner should be synchronized as
-this module uses timestamps for synchronizing audio input.
+*Using this module with microphone input via [retico-zmq](https://github.com/retico-team/retico-zmq) can cause time 
+alignment issues, and is experimental. To avoid this, the runner housing the TurnTakingModule and the runner housing 
+the foreign microphone module need to be manually synchronized by coordinating when each is started.*
 
 ### Backchannel Example ###
 ```python
@@ -62,6 +61,9 @@ maai.stop()
 debug.stop()
 ```
 
+#### *Note ####
+*The backchannel module is intended to be used with a single microphone input.*
+
 ### Nod Prediction Example ###
 ```python
 from retico_core.debug import DebugModule
@@ -85,6 +87,9 @@ mic.stop()
 maai.stop()
 debug.stop()
 ```
+
+#### *Note ####
+*The nod prediction module is intended to be used with a single microphone input.*
 
 ### Citations ###
 Koji Inoue, Bing'er Jiang, Erik Ekstedt, Tatsuya Kawahara, Gabriel Skantze

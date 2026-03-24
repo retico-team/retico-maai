@@ -209,16 +209,9 @@ class MaaiBaseModule(AbstractModule):
         self._channels = {}
         self._channel_lock = Lock()
         self.channel_cnt = 0
-        self.ch1, self.ch2 = MaaiInput.Chunk(), MaaiInput.Chunk()
-        self.maai = Maai(
-            mode=self.mode,
-            lang=self.lang,
-            frame_rate=self.frame_rate,
-            audio_ch1=self.ch1,
-            audio_ch2=self.ch2,
-            device=self.device
-        )
-        self.maai.start()
+        self.ch1, self.ch2 = None, None
+        self.maai = None
+        self._maai_started = Event()
 
         self._stop_event = Event()
         self._loop = Thread(target=self._maai_loop, daemon=True)
@@ -238,6 +231,9 @@ class MaaiBaseModule(AbstractModule):
         self._loop.start()
 
     def process_update(self, um):
+        if not self._maai_started.is_set():
+            return
+
         for iu, ut in um:
             if ut == UpdateType.ADD:
                 with self._channel_lock:
@@ -261,6 +257,19 @@ class MaaiBaseModule(AbstractModule):
                                 raise RuntimeError(f"Too many channels detected -- {e}")
 
     def _maai_loop(self):
+        self.ch1, self.ch2 = MaaiInput.Chunk(), MaaiInput.Chunk()
+        self.maai = Maai(
+            mode=self.mode,
+            lang=self.lang,
+            frame_rate=self.frame_rate,
+            audio_ch1=self.ch1,
+            audio_ch2=self.ch2,
+            device=self.device
+        )
+        self.maai.start()
+        self._maai_started.set()
+        print('Starting processing...')
+
         if self._viz_type:
             self._viz_process.start()
         while not self._stop_event.is_set():
