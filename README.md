@@ -3,10 +3,42 @@
 Retico bindings for [MaAI](https://github.com/MaAI-Kyoto/MaAI),
 providing turn-taking, backchannel, and nodding inference.
 
-### Installation and requirements ###
+## Installation and Requirements
 
-The package can be installed using the following:  
-`pip install git+https://github.com/retico-team/retico-maai`
+To use the MaAI modules you first need to install the retico-maai package:
+* Install retico-maai:
+```pip install retico-maai```
+
+  or, for the latest development version from GitHub:
+```pip install git+https://github.com/retico-team/retico-maai.git```
+
+## Modules
+
+All three modules subscribe to `AudioIU`. Each audio module subscribed to them is used as a separate speaker channel, up to two; with a single microphone, the second channel is filled with silence.
+
+### `TurnTakingModule`
+Predicts turn-taking with Voice Activity Projection (VAP) and outputs a `VAPIU`, whose payload holds, for each channel, the current and future speaking probabilities (`p_now`, `p_future`) and voice activity (`vad`).
+
+#### Arguments:
+* `mode` (str): `"vap_mc"` or `"vap"`; defaults to `"vap_mc"`
+* `lang` (str): the model language: `"en"`, `"jp"`, `"ch"` or `"tri"` (trilingual), or their `_kyoto` variants; defaults to `"en"`
+* `frame_rate` (int): predictions per second: `5`, `10` or `20`; defaults to `10`
+* `viz_type` (str): optional live visualization: `"gui_plot"`, `"gui_bar"` or `"console_bar"`; defaults to `None` (no visualization)
+
+### `BackchannelModule`
+Predicts when the system should produce a backchannel (e.g. "yeah", "uh-huh") and outputs a `BackchannelIU` with the probability `p_bc`.
+
+#### Arguments:
+* `lang` (str): `"en"`, `"jp"`, `"ch"` or `"tri"`; defaults to `"en"`
+* `frame_rate` (int): `5`, `10` or `20`; defaults to `10`
+* `viz_type` (str): same as for `TurnTakingModule`; defaults to `None`
+
+### `NodPredictionModule`
+Predicts when the system should nod and outputs a `NodIU` with the probabilities `p_bc`, `p_nod_short`, `p_nod_long` and `p_nod_long_p`. Only Japanese (`"jp"`) is available.
+
+#### Arguments:
+* `frame_rate` (int): `5`, `10` or `20`; defaults to `10`
+* `viz_type` (str): same as for `TurnTakingModule`; defaults to `None`
 
 ### Turn-Taking Example ###
 ```python

@@ -19,3 +19,9 @@ readme = "README.md"
 license = "Apache-2.0"
 license-files = ["LICENSE"]
 keywords = ['dialogue', 'real-time', 'retico', 'turn-taking', 'SDS']
+
+[project.urls]
+Repository = "https://github.com/retico-team/retico-maai"
+
+[tool.setuptools_scm]
+version_file = "retico_maai/version.py"
